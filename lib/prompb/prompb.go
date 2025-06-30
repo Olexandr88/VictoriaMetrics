@@ -229,6 +229,21 @@ func (s *Sample) unmarshalProtobuf(src []byte) (err error) {
 	return nil
 }
 
+// MetricMetadata_MetricType represents the type of a metric in MetricMetadata.
+// https://github.com/prometheus/prometheus/blob/c5282933765ec322a0664d0a0268f8276e83b156/prompb/types.pb.go#L28C1-L39C2
+type MetricMetadata_MetricType int32
+
+const (
+	MetricMetadata_UNKNOWN        MetricMetadata_MetricType = 0
+	MetricMetadata_COUNTER        MetricMetadata_MetricType = 1
+	MetricMetadata_GAUGE          MetricMetadata_MetricType = 2
+	MetricMetadata_HISTOGRAM      MetricMetadata_MetricType = 3
+	MetricMetadata_GAUGEHISTOGRAM MetricMetadata_MetricType = 4
+	MetricMetadata_SUMMARY        MetricMetadata_MetricType = 5
+	MetricMetadata_INFO           MetricMetadata_MetricType = 6
+	MetricMetadata_STATESET       MetricMetadata_MetricType = 7
+)
+
 // MetricMetadata represents additional meta information for specific MetricFamilyName
 // Refer to https://github.com/prometheus/prometheus/blob/c5282933765ec322a0664d0a0268f8276e83b156/prompb/types.proto#L21
 type MetricMetadata struct {
@@ -238,6 +253,10 @@ type MetricMetadata struct {
 	MetricFamilyName string
 	Help             string
 	Unit             string
+
+	// Additional fields to allow storing and querying metadata with multi-tenancy.
+	AccountID uint32
+	ProjectID uint32
 }
 
 func (mm *MetricMetadata) unmarshalProtobuf(src []byte) (err error) {
@@ -257,6 +276,9 @@ func (mm *MetricMetadata) unmarshalProtobuf(src []byte) (err error) {
 	//   string metric_family_name = 2;
 	//   string help = 4;
 	//   string unit = 5;
+	//
+	//  unit32 AccountID = 11;
+	//  unit32 ProjectID = 12;
 	// }
 	var fc easyproto.FieldContext
 	for len(src) > 0 {
@@ -289,6 +311,18 @@ func (mm *MetricMetadata) unmarshalProtobuf(src []byte) (err error) {
 				return fmt.Errorf("cannot read unit")
 			}
 			mm.Unit = value
+		case 11:
+			value, ok := fc.Uint32()
+			if !ok {
+				return fmt.Errorf("cannot read AccountID")
+			}
+			mm.AccountID = value
+		case 12:
+			value, ok := fc.Uint32()
+			if !ok {
+				return fmt.Errorf("cannot read ProjectID")
+			}
+			mm.ProjectID = value
 		}
 	}
 	return nil

@@ -92,7 +92,7 @@ var (
 	dropSamplesOnOverload = flag.Bool("remoteWrite.dropSamplesOnOverload", false, "Whether to drop samples when -remoteWrite.disableOnDiskQueue is set and if the samples "+
 		"cannot be pushed into the configured -remoteWrite.url systems in a timely manner. See https://docs.victoriametrics.com/victoriametrics/vmagent/#disabling-on-disk-persistence")
 
-	enableMetadata = flag.Bool("enableMetadata", false, "enable receive metadata from prometheus remote write v1 and otel, and scrape metadata "+
+	enableMetadata = flag.Bool("enableMetadata", true, "enable receive metadata from prometheus remote write v1 and otel, and scrape metadata "+
 		"")
 )
 
@@ -409,7 +409,7 @@ func tryPush(at *auth.Token, wr *prompbmarshal.WriteRequest, forceDropSamplesOnF
 		return true
 	}
 
-	// Push metadata separately from timeseries, since it doesn't need to be sharding,
+	// Push metadata separately from time series, since it doesn't need to be sharding,
 	// and can skip relabeling, stream aggregation, deduplication, etc.
 	if !tryPushMetadataToRemoteStorages(rwctxs, mms, forceDropSamplesOnFailure) {
 		return false
@@ -557,6 +557,12 @@ func tryPushMetadataToRemoteStorages(rwctxs []*remoteWriteCtx, mms []prompbmarsh
 		go func(rwctx *remoteWriteCtx) {
 			defer wg.Done()
 			if !rwctx.tryPushMetadataInternal(mms) {
+				// Couldn't push tss to remote storage
+				rwctx.pushFailures.Inc()
+				if forceDropSamplesOnFailure {
+					rwctx.metadataDroppedOnPushFailure.Add(len(mms))
+					return
+				}
 				anyPushFailed.Store(true)
 			}
 		}(rwctx)
@@ -831,8 +837,9 @@ type remoteWriteCtx struct {
 	rowsPushedAfterRelabel *metrics.Counter
 	rowsDroppedByRelabel   *metrics.Counter
 
-	pushFailures             *metrics.Counter
-	rowsDroppedOnPushFailure *metrics.Counter
+	pushFailures                 *metrics.Counter
+	metadataDroppedOnPushFailure *metrics.Counter
+	rowsDroppedOnPushFailure     *metrics.Counter
 }
 
 func newRemoteWriteCtx(argIdx int, remoteWriteURL *url.URL, maxInmemoryBlocks int, sanitizedURL string) *remoteWriteCtx {
@@ -896,8 +903,9 @@ func newRemoteWriteCtx(argIdx int, remoteWriteURL *url.URL, maxInmemoryBlocks in
 		rowsPushedAfterRelabel: metrics.GetOrCreateCounter(fmt.Sprintf(`vmagent_remotewrite_rows_pushed_after_relabel_total{path=%q,url=%q}`, queuePath, sanitizedURL)),
 		rowsDroppedByRelabel:   metrics.GetOrCreateCounter(fmt.Sprintf(`vmagent_remotewrite_relabel_metrics_dropped_total{path=%q,url=%q}`, queuePath, sanitizedURL)),
 
-		pushFailures:             metrics.GetOrCreateCounter(fmt.Sprintf(`vmagent_remotewrite_push_failures_total{path=%q,url=%q}`, queuePath, sanitizedURL)),
-		rowsDroppedOnPushFailure: metrics.GetOrCreateCounter(fmt.Sprintf(`vmagent_remotewrite_samples_dropped_total{path=%q,url=%q}`, queuePath, sanitizedURL)),
+		pushFailures:                 metrics.GetOrCreateCounter(fmt.Sprintf(`vmagent_remotewrite_push_failures_total{path=%q,url=%q}`, queuePath, sanitizedURL)),
+		metadataDroppedOnPushFailure: metrics.GetOrCreateCounter(fmt.Sprintf(`vmagent_remotewrite_metadata_dropped_total{path=%q,url=%q}`, queuePath, sanitizedURL)),
+		rowsDroppedOnPushFailure:     metrics.GetOrCreateCounter(fmt.Sprintf(`vmagent_remotewrite_samples_dropped_total{path=%q,url=%q}`, queuePath, sanitizedURL)),
 	}
 	rwctx.initStreamAggrConfig()
 
