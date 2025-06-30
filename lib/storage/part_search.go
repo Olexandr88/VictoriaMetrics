@@ -33,7 +33,8 @@ type partSearch struct {
 
 	metaindex []metaindexRow
 
-	bhs []blockHeader
+	bhs           []blockHeader
+	tmpIndexBlock *indexBlock
 
 	compressedIndexBuf []byte
 	indexBuf           []byte
@@ -48,6 +49,7 @@ func (ps *partSearch) reset() {
 	ps.tsidIdx = 0
 	ps.metaindex = nil
 	ps.bhs = nil
+	ps.tmpIndexBlock = nil
 	ps.compressedIndexBuf = ps.compressedIndexBuf[:0]
 	ps.indexBuf = ps.indexBuf[:0]
 	ps.err = nil
@@ -63,6 +65,7 @@ var isInTest = func() bool {
 // tsids cannot be modified after the Init call, since it is owned by ps.
 func (ps *partSearch) Init(p *part, tsids []TSID, tr TimeRange) {
 	ps.reset()
+	ps.tmpIndexBlock = &indexBlock{}
 	ps.p = p
 
 	if p.ph.MinTimestamp <= tr.MaxTimestamp && p.ph.MaxTimestamp >= tr.MinTimestamp {
@@ -189,7 +192,9 @@ func (ps *partSearch) nextBHS() bool {
 				return false
 			}
 			b = ib
-			ibCache.PutBlock(indexBlockKey, b)
+			if ibCache.PutBlock(indexBlockKey, b) {
+				ps.tmpIndexBlock = &indexBlock{}
+			}
 		}
 		ib := b.(*indexBlock)
 		ps.bhs = ib.bhs

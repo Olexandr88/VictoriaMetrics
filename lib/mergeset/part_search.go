@@ -38,6 +38,9 @@ type partSearch struct {
 	ibItemIdx int
 
 	sparse bool
+
+	tmpIndexBlock *indexBlock
+	tmpDataBlock  *inmemoryBlock
 }
 
 func (ps *partSearch) reset() {
@@ -61,6 +64,11 @@ func (ps *partSearch) reset() {
 //
 // Use Seek for search in p.
 func (ps *partSearch) Init(p *part, sparse bool) {
+	if ps.tmpDataBlock == nil {
+		ps.tmpDataBlock = &inmemoryBlock{}
+	}
+	ps.tmpDataBlock.Reset()
+	ps.tmpIndexBlock = &indexBlock{}
 	ps.reset()
 
 	ps.p = p
@@ -276,7 +284,9 @@ func (ps *partSearch) nextBHS() error {
 			return fmt.Errorf("cannot read index block: %w", err)
 		}
 		b = idxb
-		idxbCache.PutBlock(idxbKey, b)
+		if idxbCache.PutBlock(idxbKey, b) {
+			ps.tmpIndexBlock = &indexBlock{}
+		}
 	}
 	idxb := b.(*indexBlock)
 	ps.bhs = idxb.bhs
@@ -292,9 +302,8 @@ func (ps *partSearch) readIndexBlock(mr *metaindexRow) (*indexBlock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot decompress index block: %w", err)
 	}
-	idxb := &indexBlock{
-		buf: append([]byte{}, ps.indexBuf...),
-	}
+	idxb := ps.tmpIndexBlock
+	idxb.buf = append(idxb.buf[:0], ps.indexBuf...)
 	idxb.bhs, err = unmarshalBlockHeadersNoCopy(idxb.bhs[:0], idxb.buf, int(mr.blockHeadersCount))
 	if err != nil {
 		return nil, fmt.Errorf("cannot unmarshal block headers from index block (offset=%d, size=%d): %w", mr.indexBlockOffset, mr.indexBlockSize, err)
@@ -318,7 +327,9 @@ func (ps *partSearch) getInmemoryBlock(bh *blockHeader) (*inmemoryBlock, error) 
 			return nil, err
 		}
 		b = ib
-		cache.PutBlock(ibKey, b)
+		if cache.PutBlock(ibKey, b) {
+			ps.tmpDataBlock = &inmemoryBlock{}
+		}
 	}
 	ib := b.(*inmemoryBlock)
 	return ib, nil
@@ -333,7 +344,8 @@ func (ps *partSearch) readInmemoryBlock(bh *blockHeader) (*inmemoryBlock, error)
 	ps.sb.lensData = bytesutil.ResizeNoCopyMayOverallocate(ps.sb.lensData, int(bh.lensBlockSize))
 	ps.p.lensFile.MustReadAt(ps.sb.lensData, int64(bh.lensBlockOffset))
 
-	ib := &inmemoryBlock{}
+	ps.tmpDataBlock.Reset()
+	ib := ps.tmpDataBlock
 	if err := ib.UnmarshalData(&ps.sb, bh.firstItem, bh.commonPrefix, bh.itemsCount, bh.marshalType); err != nil {
 		return nil, fmt.Errorf("cannot unmarshal storage block with %d items: %w", bh.itemsCount, err)
 	}
