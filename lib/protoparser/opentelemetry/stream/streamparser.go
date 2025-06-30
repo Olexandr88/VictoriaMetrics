@@ -14,6 +14,7 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fasttime"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/flagutil"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/prompb"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/prompbmarshal"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/protoparser/opentelemetry/pb"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/protoparser/protoparserutil"
@@ -26,7 +27,7 @@ var maxRequestSize = flagutil.NewBytes("opentelemetry.maxRequestSize", 64*1024*1
 // callback shouldn't hold tss items after returning.
 //
 // optional processBody can be used for pre-processing the read request body from r before parsing it in OpenTelemetry format.
-func ParseStream(r io.Reader, encoding string, processBody func(data []byte) ([]byte, error), callback func(tss []prompbmarshal.TimeSeries) error) error {
+func ParseStream(r io.Reader, encoding string, processBody func(data []byte) ([]byte, error), callback func(tss []prompbmarshal.TimeSeries, mms []prompbmarshal.MetricMetadata) error) error {
 	err := protoparserutil.ReadUncompressedData(r, encoding, maxRequestSize, func(data []byte) error {
 		if processBody != nil {
 			dataNew, err := processBody(data)
@@ -43,7 +44,7 @@ func ParseStream(r io.Reader, encoding string, processBody func(data []byte) ([]
 	return nil
 }
 
-func parseData(data []byte, callback func(tss []prompbmarshal.TimeSeries) error) error {
+func parseData(data []byte, callback func(tss []prompbmarshal.TimeSeries, mms []prompbmarshal.MetricMetadata) error) error {
 	var req pb.ExportMetricsServiceRequest
 	if err := req.UnmarshalProtobuf(data); err != nil {
 		return fmt.Errorf("cannot unmarshal request from %d bytes: %w", len(data), err)
@@ -54,8 +55,8 @@ func parseData(data []byte, callback func(tss []prompbmarshal.TimeSeries) error)
 
 	wr.parseRequestToTss(&req)
 
-	if err := callback(wr.tss); err != nil {
-		return fmt.Errorf("error when processing OpenTelemetry samples: %w", err)
+	if err := callback(wr.tss, wr.mms); err != nil {
+		return fmt.Errorf("error when processing OpenTelemetry data: %w", err)
 	}
 
 	return nil
@@ -64,17 +65,24 @@ func parseData(data []byte, callback func(tss []prompbmarshal.TimeSeries) error)
 var skippedSampleLogger = logger.WithThrottler("otlp_skipped_sample", 5*time.Second)
 
 func (wr *writeContext) appendSamplesFromScopeMetrics(sc *pb.ScopeMetrics) {
+	metadataList := make(map[string]struct{}, len(sc.Metrics))
 	for _, m := range sc.Metrics {
 		if len(m.Name) == 0 {
 			// skip metrics without names
 			continue
 		}
 		metricName := sanitizeMetricName(m)
+		metadata := prompbmarshal.MetricMetadata{
+			MetricFamilyName: metricName,
+			Help:             m.Description,
+			Unit:             m.Unit,
+		}
 		switch {
 		case m.Gauge != nil:
 			for _, p := range m.Gauge.DataPoints {
 				wr.appendSampleFromNumericPoint(metricName, p)
 			}
+			metadata.Type = uint32(prompb.MetricMetadata_GAUGE)
 		case m.Sum != nil:
 			if m.Sum.AggregationTemporality != pb.AggregationTemporalityCumulative {
 				rowsDroppedUnsupportedSum.Inc()
@@ -84,10 +92,12 @@ func (wr *writeContext) appendSamplesFromScopeMetrics(sc *pb.ScopeMetrics) {
 			for _, p := range m.Sum.DataPoints {
 				wr.appendSampleFromNumericPoint(metricName, p)
 			}
+			metadata.Type = uint32(prompb.MetricMetadata_COUNTER)
 		case m.Summary != nil:
 			for _, p := range m.Summary.DataPoints {
 				wr.appendSamplesFromSummary(metricName, p)
 			}
+			metadata.Type = uint32(prompb.MetricMetadata_SUMMARY)
 		case m.Histogram != nil:
 			if m.Histogram.AggregationTemporality != pb.AggregationTemporalityCumulative {
 				rowsDroppedUnsupportedHistogram.Inc()
@@ -97,6 +107,7 @@ func (wr *writeContext) appendSamplesFromScopeMetrics(sc *pb.ScopeMetrics) {
 			for _, p := range m.Histogram.DataPoints {
 				wr.appendSamplesFromHistogram(metricName, p)
 			}
+			metadata.Type = uint32(prompb.MetricMetadata_HISTOGRAM)
 		case m.ExponentialHistogram != nil:
 			if m.ExponentialHistogram.AggregationTemporality != pb.AggregationTemporalityCumulative {
 				rowsDroppedUnsupportedExponentialHistogram.Inc()
@@ -106,9 +117,15 @@ func (wr *writeContext) appendSamplesFromScopeMetrics(sc *pb.ScopeMetrics) {
 			for _, p := range m.ExponentialHistogram.DataPoints {
 				wr.appendSamplesFromExponentialHistogram(metricName, p)
 			}
+			metadata.Type = uint32(prompb.MetricMetadata_HISTOGRAM)
 		default:
 			rowsDroppedUnsupportedMetricType.Inc()
 			skippedSampleLogger.Warnf("unsupported type for metric %q", metricName)
+			continue
+		}
+		if _, ok := metadataList[metadata.MetricFamilyName]; !ok {
+			wr.mms = append(wr.mms, metadata)
+			metadataList[metadata.MetricFamilyName] = struct{}{}
 		}
 	}
 }
@@ -284,6 +301,8 @@ type writeContext struct {
 	// tss holds parsed time series
 	tss []prompbmarshal.TimeSeries
 
+	mms []prompbmarshal.MetricMetadata
+
 	// baseLabels are labels, which must be added to all the ingested samples
 	baseLabels []prompbmarshal.Label
 
@@ -298,6 +317,7 @@ type writeContext struct {
 func (wr *writeContext) reset() {
 	clear(wr.tss)
 	wr.tss = wr.tss[:0]
+	wr.mms = wr.mms[:0]
 
 	wr.baseLabels = resetLabels(wr.baseLabels)
 	wr.pointLabels = resetLabels(wr.pointLabels)

@@ -36,17 +36,18 @@ func InsertHandler(at *auth.Token, req *http.Request) error {
 			return fmt.Errorf("json encoding isn't supported for opentelemetry format. Use protobuf encoding")
 		}
 	}
-	return stream.ParseStream(req.Body, encoding, processBody, func(tss []prompbmarshal.TimeSeries) error {
-		return insertRows(at, tss, extraLabels)
+	return stream.ParseStream(req.Body, encoding, processBody, func(tss []prompbmarshal.TimeSeries, mms []prompbmarshal.MetricMetadata) error {
+		return insertRows(at, tss, mms, extraLabels)
 	})
 }
 
-func insertRows(at *auth.Token, tss []prompbmarshal.TimeSeries, extraLabels []prompbmarshal.Label) error {
+func insertRows(at *auth.Token, tss []prompbmarshal.TimeSeries, mms []prompbmarshal.MetricMetadata, extraLabels []prompbmarshal.Label) error {
 	ctx := common.GetPushCtx()
 	defer common.PutPushCtx(ctx)
 
 	rowsTotal := 0
 	tssDst := ctx.WriteRequest.Timeseries[:0]
+	mmsDst := ctx.WriteRequest.Metadata[:0]
 	labels := ctx.Labels[:0]
 	samples := ctx.Samples[:0]
 	for i := range tss {
@@ -63,6 +64,19 @@ func insertRows(at *auth.Token, tss []prompbmarshal.TimeSeries, extraLabels []pr
 		})
 	}
 	ctx.WriteRequest.Timeseries = tssDst
+
+	var accountID, projectID uint32
+	if at != nil {
+		accountID = at.AccountID
+		projectID = at.ProjectID
+	}
+	for i := range mms {
+		mm := mms[i]
+		mm.AccountID = accountID
+		mm.ProjectID = projectID
+		mmsDst = append(mmsDst, mm)
+	}
+	ctx.WriteRequest.Metadata = mms
 	ctx.Labels = labels
 	ctx.Samples = samples
 	if !remotewrite.TryPush(at, &ctx.WriteRequest) {

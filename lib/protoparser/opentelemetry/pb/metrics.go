@@ -152,6 +152,7 @@ func (sm *ScopeMetrics) unmarshalProtobuf(src []byte) (err error) {
 // Metric represents the corresponding OTEL protobuf message
 type Metric struct {
 	Name                 string
+	Description          string
 	Unit                 string
 	Gauge                *Gauge
 	Sum                  *Sum
@@ -162,6 +163,7 @@ type Metric struct {
 
 func (m *Metric) marshalProtobuf(mm *easyproto.MessageMarshaler) {
 	mm.AppendString(1, m.Name)
+	mm.AppendString(2, m.Description)
 	mm.AppendString(3, m.Unit)
 	switch {
 	case m.Gauge != nil:
@@ -180,6 +182,7 @@ func (m *Metric) marshalProtobuf(mm *easyproto.MessageMarshaler) {
 func (m *Metric) unmarshalProtobuf(src []byte) (err error) {
 	// message Metric {
 	//   string name = 1;
+	//   string description = 2;
 	//   string unit = 3;
 	//   oneof data {
 	//     Gauge gauge = 5;
@@ -202,6 +205,12 @@ func (m *Metric) unmarshalProtobuf(src []byte) (err error) {
 				return fmt.Errorf("cannot read metric name")
 			}
 			m.Name = strings.Clone(name)
+		case 2:
+			description, ok := fc.String()
+			if !ok {
+				return fmt.Errorf("cannot read metric description")
+			}
+			m.Description = strings.Clone(description)
 		case 3:
 			unit, ok := fc.String()
 			if !ok {
